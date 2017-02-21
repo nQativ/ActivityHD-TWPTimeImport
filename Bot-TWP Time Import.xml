@@ -1,0 +1,211 @@
+<XML ID="{4AE0010F-B62D-4A27-B137-74F578498072}" Type="Bots">
+	<data Code="TWP Time Import" ID="{E1379469-0126-4C1F-9748-42F5C437D0EB}">
+		<Name Value="TWP Time Import"/>
+		<Description Value="Import Time Sheets from TimeWorksPlus"/>
+		<MacroType Value="General"/>
+		<EnableResults Value="False"/>
+		<Shortcut/>
+		<RecordType/>
+		<RunFrom Value="Time Sheets (Payroll)">
+			<item Code="Time Sheets (Payroll)" ID="{9D12A299-AB9E-4D99-A9FD-93B8FA56B5CE}" Assigned="True"/>
+		</RunFrom>
+		<Using/>
+		<MacroScript>Option Explicit
+
+' -- Uncomment to use VBSEdit --
+'Dim activity ' As ActivityOAS.Activity
+'
+'Set activity = CreateObject("ActivityOAS.Activity")
+'activity.ServerAddress = "CustAct1"
+'activity.Connect
+'
+'Dim company ' As ActivityOAS.Company
+'Set company = activity.Companies("")
+' -- End of Lines to Uncomment
+
+' - Constants -
+Const C_TWP_API_URL 	= "https://payrollservers.us/pg/GetActivityFile.ashx"
+Const C_TWP_SiteID	= 31048
+Const C_TWP_UserName	= "BotsTesting"
+Const C_TWP_Password	= "Testing2017!"
+Const C_TWP_FormatName	= "xml"
+
+' - Global Variables -
+Dim strPayrollRunCode	' As String
+Dim strTempFolder		' As String
+Dim strTWPActivityFile	' As String
+Dim objPayrollRun		' As ActivityOAS.PRPayrollRun
+Set objPayrollRun = company.Payroll.PRPayrollRun
+Dim objTimeSheet		' As ActivityOAS.PRPTimeSheet
+Set objTimeSheet = company.Payroll.PRPTimeSheet
+Dim objXDoc 			' As MSXML2.DomDocument.6.0
+Dim objXINode			' As MSXML2.IXMLDOMNode
+Dim objXSite			' As MSXML2.IXMLDOMNodeList
+Dim objXCards			' As MSXML2.IXMLDOMNodeList
+Dim objXCard			' As MSXML2.IXMLDOMNode
+Dim objXPunches			' As MSXML2.IXMLDOMNodeList
+Dim objXPunch			' As MSXML2.IXMLDOMNode
+' -- Map from TWP Event to GL Segment Item --
+Dim dictEvents			' As Scripting.Dictionary
+Set dictEvents = CreateObject("Scripting.Dictionary")
+'With dictEvents
+'	.Add "General Overhead", "000"
+'	.Add "Bridal Show", "301"
+'	.Add "Home Show", "350"
+'	.Add "Fair", "100"
+'	.Add "4th of July", "400"
+'	.Add "Rodeo", "450"
+'	.Add "Craft Fair", "480"
+'	.Add "Interim Event", "500"
+'	.Add "Interim Setup/Teardown", "600"
+'	.Add "Turf Club", "800"
+'End With
+
+' - Functions/Subroutines -
+Dim strPrintLog				' As String
+Sub PrintLine( strLine)
+	'Debug.WriteLine strLine
+	MacroProcess.AddMessage strLine
+	strPrintLog = strPrintLog &amp; vbCrLf &amp; strLine
+End Sub
+
+Sub FatalError( strDescription)
+	Err.Raise vbObjectError + 10, "TWP Import Time", strDescription
+End Sub
+
+Sub AddResult( obj)
+	MacroProcess.Results.Add obj
+End Sub
+
+Function BrowseForFile()
+	Dim wShell : Set wShell=CreateObject("WScript.Shell")
+	Dim oExec  : Set oExec=wShell.Exec("mshta.exe ""about:&lt;input type=file id=FILE /&gt;&lt;script&gt;FILE.click();new ActiveXObject('Scripting.FileSystemObject').GetStandardStream(1).WriteLine(FILE.value);close();resizeTo(0,0);&lt;/script&gt;""")
+	BrowseForFile = oExec.StdOut.ReadLine
+End Function
+
+Function UpdateAccrualAccount( strAccount, strEvent)
+	Dim strSegmentItem
+	If dictEvents.Exists(strEvent) Then
+		strSegmentItem = dictEvents(strEvent)
+		UpdateAccrualAccount = Left(strAccount,9) &amp; strSegmentItem &amp; Right(strAccount,2)
+	Else
+		UpdateAccrualAccount = strAccount
+	End If
+End Function
+
+Function FormatDateYYYYMMDD( dateVar)
+	FormatDateYYYYMMDD = CStr(Year(dateVar)) &amp; Right("0" &amp; CStr(Month(dateVar)),2) &amp; Right("0" &amp; CStr(Day(dateVar)),2)
+End Function
+
+Function FormatDateYYYYMD( dateVar)
+	FormatDateYYYYMD = CStr(Year(dateVar)) &amp; "-" &amp;  CStr(Month(dateVar)) &amp; "-" &amp; CStr(Day(dateVar))
+End Function
+
+Function GetTWPActivityFile( dateBegin, dateEnd, strFilename)
+	GetTWPActivityFile = False
+	
+	Dim objHttp
+	Set objHttp = CreateObject("MSXML2.XMLHTTP.6.0")
+	
+	Dim strQuery
+	strQuery = "UserName=" &amp; C_TWP_UserName &amp; "&amp;" &amp; _
+					"Password=" &amp; C_TWP_Password &amp; "&amp;" &amp; _
+					"SiteNumber=" &amp; C_TWP_SiteID &amp; "&amp;" &amp; _
+					"FormatName=" &amp; C_TWP_FormatName &amp; "&amp;" &amp; _
+					"BeginDate=" &amp; FormatDateYYYYMD(dateBegin) &amp; "&amp;" &amp; _
+					"EndDate=" &amp; FormatDateYYYYMD(dateEnd)
+					
+	objHttp.Open "GET", C_TWP_API_URL &amp; "?" &amp; strQuery, False
+	objHttp.setRequestHeader "Content-Type", "application/x-www-form-urlencoded"
+	objHttp.send 
+	
+	If (objHttp.Status = 200) And (Len(objHttp.responseText) &gt; 0) Then
+		Dim objXDoc 
+		Set objXDoc = CreateObject("MSXML2.DOMDocument.6.0")
+		objXDoc.LoadXML "&lt;?xml version=""1.0""?&gt;" &amp; objHttp.responseText
+		objXDoc.Save strFilename
+		GetTWPActivityFile = True
+	End If
+End Function
+
+' - MAIN -
+
+strPayrollRunCode = company.FindCode("Payroll", "Payroll Runs")
+'strPayrollRunCode = "H - 2017-02-06"
+If (strPayrollRunCode = "") Then
+	FatalError "No Payroll Run selected for import."
+End If
+objPayrollRun.Locate strPayrollRunCode
+
+' - Get the Temporary Folder for this user
+strTempFolder = CreateObject("Scripting.FileSystemObject").GetSpecialFolder(2)	' -- 2: Temporary Folder
+strTWPActivityFile = strTempFolder &amp; "\" &amp; "TWP-Testing-" &amp; FormatDateYYYYMMDD(objPayrollRun.PeriodBeginDate) &amp; "-" &amp; FormatDateYYYYMMDD(objPayrollRun.PeriodEndDate) &amp; ".xml"
+
+If (Not GetTWPActivityFile( objPayrollRun.PeriodBeginDate, objPayrollRun.PeriodEndDate, strTWPActivityFile)) Then
+	FatalError "Unable to download TimeWorks Plus Activity file for the period: " &amp; FormatDateTime(objPayrollRun.PeriodBeginDate,2) &amp; " to " &amp; FormatDateTime(objPayrollRun.PeriodEndDate,2)
+End If
+
+Set objXDoc = CreateObject("MSXML2.DomDocument.6.0")
+If (strTWPActivityFile = "") Then
+	strTWPActivityFile = BrowseForFile
+	If (strTWPActivityFile = "") Then
+		FatalError "No file selected for import."
+	End If
+End If
+objXDoc.load strTWPActivityFile
+If (objXDoc.parseError.errorCode &lt;&gt; 0) Then
+	FatalError "XML Parse Error: " &amp; objXDoc.parseError.reason
+End If
+
+Set objXINode = objXDoc.selectSingleNode("/response/CardReport/BeginDate")
+Set objXINode = objXDoc.selectSingleNode("/response/CardReport/EndDate")
+Set objXSite = objXDoc.selectNodes("/repsonse/CardReport/Site")
+
+Set objXCards = objXDoc.selectNodes("/response/CardReport/Cards/Card")
+For Each objXCard In objXCards
+	
+	
+	Set objXPunches = objXCard.selectNodes("Punches/Punch")
+	If (objXPunches.length &gt; 0) Then
+		objTimeSheet.New
+		objTimeSheet.PREmployeeCode = objXCard.selectSingleNode("Employee/EmployeeCode").text 
+		On Error Resume Next
+		objTimeSheet.PRPayrollRun = objPayrollRun.Fields("PRPayrollRun").Value
+		If (Err.Number &lt;&gt; 0) Then
+			PrintLine "Error Processing Employee Code : " &amp; objTimeSheet.PREmployeeCode
+			PrintLine "   Err: " &amp; Err.Description
+			On Error Goto 0
+		Else
+			On Error Goto 0
+			For Each objXPunch In objXPunches
+				With objTimeSheet.TimeSheetLines
+					.Append
+					.WorkDate = objXPunch.selectSingleNode("PunchDate").text
+					.PRPTimeCodeCode = "R"
+					.Source = objXPunch.selectSingleNode("Hours").text
+					.AccrualDebitAccountMask = UpdateAccrualAccount( .AccrualDebitAccountMask, objXPunch.selectSingleNode("X").text)
+					.Fields("Memo").Value = objXPunch.selectSingleNode("X").text
+					.Post
+				End With
+			Next
+			objTimeSheet.Save
+			AddResult objTimeSheet
+		End IF
+	Else
+		'Debug.WriteLine "No punches for Employee Code: " &amp; objXCard.selectSingleNode("Employee/EmployeeCode").text
+	End If
+Next
+
+'PrintLine "End of Main"</MacroScript>
+		<MacroScriptInit/>
+		<MacroScriptFinal/>
+		<AccessControl Value="All"/>
+		<Permissions/>
+		<Obsolete Value="False"/>
+		<Memo/>
+		<CreateDate Value="2017-02-09T11:32:59.987"/>
+		<CreateUser Value="pjohnston"/>
+		<ReviseDate Value="2017-02-09T16:16:14.827"/>
+		<ReviseUser Value="pjohnston"/>
+	</data>
+</XML>
